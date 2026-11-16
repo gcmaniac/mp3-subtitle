@@ -19,6 +19,8 @@ typedef struct Mp3Player {
     wchar_t last_error[512];
 } Mp3Player;
 
+typedef Mp3Player AudioPlayer;
+
 void player_init(Mp3Player *p);
 bool player_open(Mp3Player *p, const wchar_t *path);
 void player_close(Mp3Player *p);

@@ -54,9 +54,40 @@ bool player_open(Mp3Player *p, const wchar_t *path) {
     player_close(p);
 
     wchar_t cmd[MAX_PATH + 128];
+    bool opened = false;
+
+    /* Strategy:
+     * 1. Try auto-detect open (no type) so Windows MCI routes via registry extension mapping
+     *    (WaveAudio for .wav, Sequencer for .mid, MPEGVideo for .mp3/.wma/.m4a/.aac, etc.)
+     * 2. If that fails, try explicit 'type mpegvideo' (DirectShow / Quartz filter graph,
+     *    which handles MP3, WMA, M4A, AAC, FLAC, OGG, etc. on modern Windows)
+     * 3. If that fails, try explicit 'type waveaudio' (for RIFF wave files)
+     */
     _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]),
-               L"open \"%ls\" type mpegvideo alias " MCI_ALIAS, path);
-    if (!mci_exec(p, cmd, NULL, 0)) {
+               L"open \"%ls\" alias " MCI_ALIAS, path);
+    if (mci_exec(NULL, cmd, NULL, 0)) {
+        opened = true;
+    } else {
+        _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]),
+                   L"open \"%ls\" type mpegvideo alias " MCI_ALIAS, path);
+        if (mci_exec(NULL, cmd, NULL, 0)) {
+            opened = true;
+        } else {
+            _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]),
+                       L"open \"%ls\" type waveaudio alias " MCI_ALIAS, path);
+            if (mci_exec(p, cmd, NULL, 0)) {
+                opened = true;
+            }
+        }
+    }
+
+    if (!opened) {
+        if (p->last_error[0] == L'\0') {
+            /* Capture error from the primary command */
+            _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]),
+                       L"open \"%ls\" alias " MCI_ALIAS, path);
+            mci_exec(p, cmd, NULL, 0);
+        }
         return false;
     }
 

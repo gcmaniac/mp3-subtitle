@@ -34,7 +34,7 @@ static wchar_t *dup_wcs(const wchar_t *s) {
     return copy;
 }
 
-static bool matches_mp3_srt_name(const wchar_t *fname, const wchar_t *base, size_t base_len) {
+static bool matches_audio_srt_name(const wchar_t *fname, const wchar_t *base, size_t base_len) {
     if (!fname || !base || base_len == 0) {
         return false;
     }
@@ -59,20 +59,20 @@ static bool matches_mp3_srt_name(const wchar_t *fname, const wchar_t *base, size
     return false;
 }
 
-bool srt_discover_tracks(const wchar_t *mp3_path, SrtTrackList *out_list) {
-    if (!mp3_path || !out_list) {
+bool srt_discover_tracks(const wchar_t *audio_path, SrtTrackList *out_list) {
+    if (!audio_path || !out_list) {
         return false;
     }
     memset(out_list, 0, sizeof(*out_list));
 
-    const wchar_t *last_slash = wcsrchr(mp3_path, L'\\');
-    const wchar_t *last_fslash = wcsrchr(mp3_path, L'/');
+    const wchar_t *last_slash = wcsrchr(audio_path, L'\\');
+    const wchar_t *last_fslash = wcsrchr(audio_path, L'/');
     if (last_fslash && (!last_slash || last_fslash > last_slash)) {
         last_slash = last_fslash;
     }
 
-    const wchar_t *fname = last_slash ? (last_slash + 1) : mp3_path;
-    size_t dir_len = last_slash ? (size_t)(last_slash - mp3_path + 1) : 0;
+    const wchar_t *fname = last_slash ? (last_slash + 1) : audio_path;
+    size_t dir_len = last_slash ? (size_t)(last_slash - audio_path + 1) : 0;
 
     const wchar_t *last_dot = wcsrchr(fname, L'.');
     size_t base_len = last_dot ? (size_t)(last_dot - fname) : wcslen(fname);
@@ -95,7 +95,7 @@ bool srt_discover_tracks(const wchar_t *mp3_path, SrtTrackList *out_list) {
         return false;
     }
     if (dir_len > 0) {
-        memcpy(pattern, mp3_path, dir_len * sizeof(wchar_t));
+        memcpy(pattern, audio_path, dir_len * sizeof(wchar_t));
     }
     memcpy(pattern + dir_len, base, base_len * sizeof(wchar_t));
     wcscpy(pattern + dir_len + base_len, L"*.srt");
@@ -111,7 +111,7 @@ bool srt_discover_tracks(const wchar_t *mp3_path, SrtTrackList *out_list) {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 continue;
             }
-            if (!matches_mp3_srt_name(fd.cFileName, base, base_len)) {
+            if (!matches_audio_srt_name(fd.cFileName, base, base_len)) {
                 continue;
             }
             if (count == cap) {
@@ -132,7 +132,7 @@ bool srt_discover_tracks(const wchar_t *mp3_path, SrtTrackList *out_list) {
                 break;
             }
             if (dir_len > 0) {
-                memcpy(full, mp3_path, dir_len * sizeof(wchar_t));
+                memcpy(full, audio_path, dir_len * sizeof(wchar_t));
             }
             memcpy(full + dir_len, fd.cFileName, (fn_len + 1) * sizeof(wchar_t));
             items[count].path = full;

@@ -60,11 +60,18 @@ static void test_discovery_alphabetical(void) {
     assert(_wcsicmp(list.names[3], L"My Track.srt") == 0);
     srt_free_track_list(&list);
 
-    /* Non-matching mp3 */
-    _snwprintf(mp3_path, MAX_PATH, L"%ls\\NoSub.mp3", test_dir);
-    assert(srt_discover_tracks(mp3_path, &list));
-    assert(list.count == 0);
-    srt_free_track_list(&list);
+    /* Test with other audio extensions: .wav, .m4a, .flac, .wma */
+    const wchar_t *exts[] = { L"wav", L"m4a", L"flac", L"wma", L"aac", L"ogg" };
+    for (size_t e = 0; e < sizeof(exts) / sizeof(exts[0]); e++) {
+        _snwprintf(mp3_path, MAX_PATH, L"%ls\\My Track.%ls", test_dir, exts[e]);
+        assert(srt_discover_tracks(mp3_path, &list));
+        assert(list.count == 4);
+        assert(_wcsicmp(list.names[0], L"My Track.ar.srt") == 0);
+        assert(_wcsicmp(list.names[1], L"My Track.en.srt") == 0);
+        assert(_wcsicmp(list.names[2], L"My Track.id.srt") == 0);
+        assert(_wcsicmp(list.names[3], L"My Track.srt") == 0);
+        srt_free_track_list(&list);
+    }
 
     /* Cleanup */
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {

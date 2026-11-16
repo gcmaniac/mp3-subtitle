@@ -113,11 +113,11 @@ static void update_window_title(void) {
     if (g_app.player.is_open) {
         wchar_t title[MAX_PATH + 64];
         _snwprintf(title, sizeof(title) / sizeof(title[0]),
-                   L"%ls - MP3 Subtitle Player",
+                   L"%ls - Audio Subtitle Player",
                    get_filename_part(g_app.player.current_path));
         SetWindowTextW(g_app.hwnd, title);
     } else {
-        SetWindowTextW(g_app.hwnd, L"MP3 Subtitle Player");
+        SetWindowTextW(g_app.hwnd, L"Audio Subtitle Player");
     }
 }
 
@@ -277,15 +277,15 @@ static bool load_slot_subtitle(int slot, const wchar_t *srt_path, bool is_custom
     return true;
 }
 
-static void open_mp3_file(const wchar_t *mp3_path) {
-    if (!mp3_path || !mp3_path[0]) {
+static void open_audio_file(const wchar_t *audio_path) {
+    if (!audio_path || !audio_path[0]) {
         return;
     }
     save_current_position(true);
 
-    if (!player_open(&g_app.player, mp3_path)) {
+    if (!player_open(&g_app.player, audio_path)) {
         MessageBoxW(g_app.hwnd,
-                    g_app.player.last_error[0] ? g_app.player.last_error : L"Failed to open MP3 file.",
+                    g_app.player.last_error[0] ? g_app.player.last_error : L"Failed to open audio file.",
                     L"Playback Error", MB_OK | MB_ICONERROR);
         return;
     }
@@ -295,7 +295,7 @@ static void open_mp3_file(const wchar_t *mp3_path) {
     }
     srt_free_track_list(&g_app.tracks);
 
-    srt_discover_tracks(mp3_path, &g_app.tracks);
+    srt_discover_tracks(audio_path, &g_app.tracks);
 
     /* Primary defaults to the alphabetically first matching .srt / .lang.srt */
     if (g_app.tracks.count > 0 && load_slot_subtitle(SUB_PRIMARY, g_app.tracks.paths[0], false)) {
@@ -312,7 +312,7 @@ static void open_mp3_file(const wchar_t *mp3_path) {
 
     long long resume_ms = 0;
     if (g_app.remember_pos) {
-        resume_ms = prefs_load_file_position(mp3_path);
+        resume_ms = prefs_load_file_position(audio_path);
         if (g_app.player.duration_ms > 0 && resume_ms >= g_app.player.duration_ms - 1000) {
             resume_ms = 0;
         }
@@ -330,20 +330,29 @@ static void open_mp3_file(const wchar_t *mp3_path) {
     invalidate_stage();
 }
 
-static void show_open_mp3_dialog(void) {
+static void show_open_audio_dialog(void) {
     wchar_t file_buf[MAX_PATH] = {0};
     OPENFILENAMEW ofn;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_app.hwnd;
-    ofn.lpstrFilter = L"MP3 Audio Files (*.mp3)\0*.mp3\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter =
+        L"All Supported Audio Files (*.mp3;*.wav;*.wma;*.m4a;*.aac;*.flac;*.ogg;*.mid;...)\0*.mp3;*.wav;*.wma;*.m4a;*.aac;*.flac;*.ogg;*.oga;*.opus;*.mid;*.midi;*.aif;*.aiff;*.mp2;*.mpa\0"
+        L"MP3 Audio (*.mp3)\0*.mp3\0"
+        L"Waveform Audio (*.wav)\0*.wav\0"
+        L"Windows Media Audio (*.wma)\0*.wma\0"
+        L"M4A / AAC Audio (*.m4a;*.aac)\0*.m4a;*.aac\0"
+        L"FLAC Audio (*.flac)\0*.flac\0"
+        L"Ogg Vorbis / Opus Audio (*.ogg;*.oga;*.opus)\0*.ogg;*.oga;*.opus\0"
+        L"MIDI Sequences (*.mid;*.midi)\0*.mid;*.midi\0"
+        L"All Files (*.*)\0*.*\0";
     ofn.lpstrFile = file_buf;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    ofn.lpstrTitle = L"Open MP3 File";
+    ofn.lpstrTitle = L"Open Audio File";
 
     if (GetOpenFileNameW(&ofn)) {
-        open_mp3_file(file_buf);
+        open_audio_file(file_buf);
     }
 }
 
@@ -604,7 +613,7 @@ static void paint_stage(HDC hdc, int w, int stage_h) {
             DrawTextW(mem_dc, left_txt, -1, &left_rc,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         } else {
-            DrawTextW(mem_dc, L"MP3 Subtitle Player  |  00:00 / 00:00", -1, &left_rc,
+            DrawTextW(mem_dc, L"Audio Subtitle Player  |  00:00 / 00:00", -1, &left_rc,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
 
@@ -650,7 +659,7 @@ static void paint_stage(HDC hdc, int w, int stage_h) {
         HFONT old_f = (HFONT)SelectObject(mem_dc, f_main);
         SetTextColor(mem_dc, RGB(203, 213, 225));
         RECT msg_rc = {scale_dpi(32), content_top + content_h / 3, w - scale_dpi(32), stage_h};
-        DrawTextW(mem_dc, L"Open an MP3 file (Ctrl+O) or drag & drop an MP3 here",
+        DrawTextW(mem_dc, L"Open an audio file (Ctrl+O) or drag & drop audio here",
                   -1, &msg_rc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
 
         SelectObject(mem_dc, f_sub);
@@ -723,7 +732,7 @@ static void create_main_menu(HWND hwnd) {
     HMENU hFile = CreatePopupMenu();
     HMENU hPlay = CreatePopupMenu();
 
-    AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open MP3...\tCtrl+O");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open Audio...\tCtrl+O");
     AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hFile, MF_STRING, IDM_FILE_LOADPRI, L"Load &Primary Subtitle (.srt)...");
     AppendMenuW(hFile, MF_STRING, IDM_FILE_LOADSEC, L"Load &Secondary Subtitle (.srt)...");
@@ -745,7 +754,7 @@ static void create_main_menu(HWND hwnd) {
 static void create_controls(HWND hwnd) {
     HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
 
-    g_app.btn_open = CreateWindowExW(0, L"BUTTON", L"Open MP3",
+    g_app.btn_open = CreateWindowExW(0, L"BUTTON", L"Open Audio",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                      0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_OPEN, hInst, NULL);
     g_app.btn_play = CreateWindowExW(0, L"BUTTON", L"Play",
@@ -1000,7 +1009,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         switch (id) {
         case IDC_BTN_OPEN:
         case IDM_FILE_OPEN:
-            show_open_mp3_dialog();
+            show_open_audio_dialog();
             SetFocus(hwnd);
             return 0;
 
@@ -1115,7 +1124,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     populate_slot_combo(target_slot, (int)g_app.tracks.count);
                 }
             } else {
-                open_mp3_file(path);
+                open_audio_file(path);
             }
         }
         DragFinish(hDrop);
@@ -1186,7 +1195,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     HWND hwnd = CreateWindowExW(
         0,
         class_name,
-        L"MP3 Subtitle Player",
+        L"Audio Subtitle Player",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1024, 680,
         NULL, NULL, hInstance, NULL);
@@ -1205,7 +1214,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv) {
         if (argc >= 2 && argv[1][0] != L'\0') {
-            open_mp3_file(argv[1]);
+            open_audio_file(argv[1]);
         }
         LocalFree(argv);
     }

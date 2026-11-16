@@ -23,9 +23,9 @@ typedef struct SrtTrackList {
     size_t count;
 } SrtTrackList;
 
-/* Discover matching .srt files for an MP3 path (<name>.srt or <name>.<lang>.srt),
+/* Discover matching .srt files for an audio path (<name>.srt or <name>.<lang>.srt),
  * sorted alphabetically by filename. Returns true on success (count may be 0). */
-bool srt_discover_tracks(const wchar_t *mp3_path, SrtTrackList *out_list);
+bool srt_discover_tracks(const wchar_t *audio_path, SrtTrackList *out_list);
 void srt_free_track_list(SrtTrackList *list);
 
 /* Load and parse an .srt file (UTF-8, UTF-16 LE/BE, or ANSI). */
