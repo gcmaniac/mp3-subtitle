@@ -6,6 +6,8 @@
 #include <string.h>
 #include <wchar.h>
 
+#include "player.h"
+#include "playlist.h"
 #include "prefs.h"
 #include "srt.h"
 #include "trackbar.h"
@@ -266,10 +268,254 @@ static void test_trackbar_click_to_seek(void) {
     wprintf(L"[PASS] test_trackbar_click_to_seek\n");
 }
 
+static void test_prefs_auto_next(void) {
+    wchar_t tmp_root[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp_root);
+    wchar_t ini_path[MAX_PATH];
+    _snwprintf(ini_path, MAX_PATH, L"%lsmp3sub_autonext_%lu.ini", tmp_root, GetCurrentProcessId());
+    DeleteFileW(ini_path);
+
+    prefs_init_with_path(ini_path);
+    assert(prefs_get_auto_next() == true); /* default enabled */
+
+    prefs_set_auto_next(false);
+    assert(prefs_get_auto_next() == false);
+
+    prefs_set_auto_next(true);
+    assert(prefs_get_auto_next() == true);
+
+    DeleteFileW(ini_path);
+    wprintf(L"[PASS] test_prefs_auto_next\n");
+}
+
+static void test_find_next_audio_file(void) {
+    assert(player_is_supported_audio_extension(L"test.ogg") == true);
+    assert(player_is_supported_audio_extension(L"test.mp3") == true);
+    assert(player_is_supported_audio_extension(L"test.wav") == true);
+    assert(player_is_supported_audio_extension(L"test.txt") == false);
+    assert(player_is_supported_audio_extension(L"test.srt") == false);
+
+    wchar_t tmp_root[MAX_PATH];
+    DWORD r = GetTempPathW(MAX_PATH, tmp_root);
+    assert(r > 0 && r < MAX_PATH);
+
+    wchar_t test_dir[MAX_PATH];
+    _snwprintf(test_dir, MAX_PATH, L"%lsmp3sub_next_test_%lu", tmp_root, GetCurrentProcessId());
+    CreateDirectoryW(test_dir, NULL);
+
+    const wchar_t *files[] = {
+        L"track01.mp3",
+        L"track02.ogg",
+        L"track03.wav",
+        L"track10.mp3",
+        L"track01.srt",
+        L"notes.txt"
+    };
+    wchar_t pbuf[MAX_PATH];
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        _snwprintf(pbuf, MAX_PATH, L"%ls\\%ls", test_dir, files[i]);
+        create_empty_file(pbuf);
+    }
+
+    wchar_t cur_path[MAX_PATH];
+    wchar_t next_path[MAX_PATH];
+    wchar_t expected[MAX_PATH];
+
+    /* track01.mp3 -> track02.ogg */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track01.mp3", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track02.ogg", test_dir);
+    assert(player_find_next_audio_file(cur_path, next_path, MAX_PATH));
+    assert(_wcsicmp(next_path, expected) == 0);
+
+    /* track02.ogg -> track03.wav */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track02.ogg", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track03.wav", test_dir);
+    assert(player_find_next_audio_file(cur_path, next_path, MAX_PATH));
+    assert(_wcsicmp(next_path, expected) == 0);
+
+    /* track03.wav -> track10.mp3 (natural sort: 3 before 10) */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track03.wav", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track10.mp3", test_dir);
+    assert(player_find_next_audio_file(cur_path, next_path, MAX_PATH));
+    assert(_wcsicmp(next_path, expected) == 0);
+
+    /* track10.mp3 -> no next file (returns false) */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track10.mp3", test_dir);
+    assert(!player_find_next_audio_file(cur_path, next_path, MAX_PATH));
+
+    /* Test player_find_prev_audio_file */
+    wchar_t prev_path[MAX_PATH];
+
+    /* track10.mp3 -> track03.wav */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track10.mp3", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track03.wav", test_dir);
+    assert(player_find_prev_audio_file(cur_path, prev_path, MAX_PATH));
+    assert(_wcsicmp(prev_path, expected) == 0);
+
+    /* track03.wav -> track02.ogg */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track03.wav", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track02.ogg", test_dir);
+    assert(player_find_prev_audio_file(cur_path, prev_path, MAX_PATH));
+    assert(_wcsicmp(prev_path, expected) == 0);
+
+    /* track02.ogg -> track01.mp3 */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track02.ogg", test_dir);
+    _snwprintf(expected, MAX_PATH, L"%ls\\track01.mp3", test_dir);
+    assert(player_find_prev_audio_file(cur_path, prev_path, MAX_PATH));
+    assert(_wcsicmp(prev_path, expected) == 0);
+
+    /* track01.mp3 -> no prev file (returns false) */
+    _snwprintf(cur_path, MAX_PATH, L"%ls\\track01.mp3", test_dir);
+    assert(!player_find_prev_audio_file(cur_path, prev_path, MAX_PATH));
+
+    /* Clean up */
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        _snwprintf(pbuf, MAX_PATH, L"%ls\\%ls", test_dir, files[i]);
+        DeleteFileW(pbuf);
+    }
+    RemoveDirectoryW(test_dir);
+
+    wprintf(L"[PASS] test_find_next_audio_file\n");
+}
+
+static void test_prefs_show_playlist(void) {
+    wchar_t tmp_root[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp_root);
+    wchar_t ini_path[MAX_PATH];
+    _snwprintf(ini_path, MAX_PATH, L"%lsmp3sub_showpl_%lu.ini", tmp_root, GetCurrentProcessId());
+    DeleteFileW(ini_path);
+
+    prefs_init_with_path(ini_path);
+    assert(prefs_get_show_playlist() == true); /* default enabled */
+
+    prefs_set_show_playlist(false);
+    assert(prefs_get_show_playlist() == false);
+
+    prefs_set_show_playlist(true);
+    assert(prefs_get_show_playlist() == true);
+
+    DeleteFileW(ini_path);
+    wprintf(L"[PASS] test_prefs_show_playlist\n");
+}
+
+static void test_prefs_history(void) {
+    wchar_t tmp_root[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp_root);
+    wchar_t ini_path[MAX_PATH];
+    _snwprintf(ini_path, MAX_PATH, L"%lsmp3sub_hist_%lu.ini", tmp_root, GetCurrentProcessId());
+    DeleteFileW(ini_path);
+
+    prefs_init_with_path(ini_path);
+    assert(prefs_get_history_count() == 0);
+
+    /* Add items */
+    prefs_add_history(L"D:\\Audio\\Track01.mp3");
+    assert(prefs_get_history_count() == 1);
+    wchar_t buf[MAX_PATH];
+    assert(prefs_get_history_item(0, buf, MAX_PATH));
+    assert(wcscmp(buf, L"D:\\Audio\\Track01.mp3") == 0);
+
+    prefs_add_history(L"D:\\Audio\\Track02.ogg");
+    assert(prefs_get_history_count() == 2);
+    assert(prefs_get_history_item(0, buf, MAX_PATH));
+    assert(wcscmp(buf, L"D:\\Audio\\Track02.ogg") == 0);
+    assert(prefs_get_history_item(1, buf, MAX_PATH));
+    assert(wcscmp(buf, L"D:\\Audio\\Track01.mp3") == 0);
+
+    /* Adding existing item (even with different slash/casing) should move it to top */
+    prefs_add_history(L"d:/audio/track01.mp3");
+    assert(prefs_get_history_count() == 2);
+    assert(prefs_get_history_item(0, buf, MAX_PATH));
+    assert(_wcsicmp(buf, L"d:/audio/track01.mp3") == 0);
+    assert(prefs_get_history_item(1, buf, MAX_PATH));
+    assert(wcscmp(buf, L"D:\\Audio\\Track02.ogg") == 0);
+
+    /* Test clamp to 10 items */
+    for (int i = 0; i < 15; i++) {
+        wchar_t p[MAX_PATH];
+        _snwprintf(p, MAX_PATH, L"D:\\Audio\\Bulk_%d.mp3", i);
+        prefs_add_history(p);
+    }
+    assert(prefs_get_history_count() == 10);
+    assert(prefs_get_history_item(0, buf, MAX_PATH));
+    assert(wcscmp(buf, L"D:\\Audio\\Bulk_14.mp3") == 0);
+
+    /* Clear history */
+    prefs_clear_history();
+    assert(prefs_get_history_count() == 0);
+    assert(!prefs_get_history_item(0, buf, MAX_PATH));
+
+    DeleteFileW(ini_path);
+    wprintf(L"[PASS] test_prefs_history\n");
+}
+
+static void test_playlist_scan_and_navigation(void) {
+    wchar_t tmp_root[MAX_PATH];
+    DWORD r = GetTempPathW(MAX_PATH, tmp_root);
+    assert(r > 0 && r < MAX_PATH);
+
+    wchar_t test_dir[MAX_PATH];
+    _snwprintf(test_dir, MAX_PATH, L"%lsmp3sub_pl_test_%lu", tmp_root, GetCurrentProcessId());
+    CreateDirectoryW(test_dir, NULL);
+
+    const wchar_t *files[] = {
+        L"10_track.mp3",
+        L"02_track.ogg",
+        L"01_track.wav",
+        L"readme.txt"
+    };
+    wchar_t pbuf[MAX_PATH];
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        _snwprintf(pbuf, MAX_PATH, L"%ls\\%ls", test_dir, files[i]);
+        create_empty_file(pbuf);
+    }
+
+    Playlist pl;
+    playlist_init(&pl);
+
+    wchar_t target_file[MAX_PATH];
+    _snwprintf(target_file, MAX_PATH, L"%ls\\02_track.ogg", test_dir);
+
+    assert(playlist_scan_folder(&pl, target_file));
+    assert(pl.count == 3); /* skips readme.txt */
+    assert(pl.current_index == 1); /* 01_track.wav is 0, 02_track.ogg is 1 */
+
+    /* Verify natural sorting */
+    assert(_wcsicmp(playlist_get_name(&pl, 0), L"01_track.wav") == 0);
+    assert(_wcsicmp(playlist_get_name(&pl, 1), L"02_track.ogg") == 0);
+    assert(_wcsicmp(playlist_get_name(&pl, 2), L"10_track.mp3") == 0);
+
+    /* Verify index lookup */
+    wchar_t lookup_file[MAX_PATH];
+    _snwprintf(lookup_file, MAX_PATH, L"%ls\\10_track.mp3", test_dir);
+    assert(playlist_find_index(&pl, lookup_file) == 2);
+    assert(playlist_find_index(&pl, L"10_track.mp3") == 2);
+    assert(playlist_find_index(&pl, L"nonexistent.mp3") == -1);
+
+    /* Free playlist */
+    playlist_free(&pl);
+    assert(pl.count == 0);
+    assert(pl.paths == NULL);
+
+    /* Clean up files */
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        _snwprintf(pbuf, MAX_PATH, L"%ls\\%ls", test_dir, files[i]);
+        DeleteFileW(pbuf);
+    }
+    RemoveDirectoryW(test_dir);
+
+    wprintf(L"[PASS] test_playlist_scan_and_navigation\n");
+}
+
 int wmain(void) {
     test_discovery_alphabetical();
     test_srt_parse_and_lookup();
     test_prefs_remember_position();
+    test_prefs_auto_next();
+    test_prefs_show_playlist();
+    test_prefs_history();
+    test_find_next_audio_file();
+    test_playlist_scan_and_navigation();
     test_trackbar_click_to_seek();
     wprintf(L"All tests passed.\n");
     return 0;

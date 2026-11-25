@@ -13,6 +13,13 @@
 #define IDM_PLAY_STOP       40011
 #define IDM_PLAY_FWD5       40012
 #define IDM_PLAY_BACK5      40013
+#define IDM_PLAY_PREVFILE   40014
+#define IDM_PLAY_NEXTFILE   40015
+#define IDM_VIEW_PLAYLIST   40020
+
+#define IDM_FILE_RECENT_BASE   40100
+#define IDM_FILE_RECENT_MAX    (IDM_FILE_RECENT_BASE + 10)
+#define IDM_FILE_CLEAR_RECENT  40120
 
 /* Child Control IDs */
 #define IDC_BTN_OPEN        1001
@@ -23,6 +30,7 @@
 #define IDC_LABEL_VOL       1006
 #define IDC_SLIDER_VOL      1007
 #define IDC_CHK_REMEMBER    1008
+#define IDC_CHK_AUTONEXT    1009
 
 #define IDC_LABEL_SUB_PRI   1010
 #define IDC_COMBO_SUB_PRI   1011
@@ -35,6 +43,13 @@
 #define IDC_LABEL_SUB_TER   1030
 #define IDC_COMBO_SUB_TER   1031
 #define IDC_BTN_LOAD_TER    1032
+
+#define IDC_BTN_PREV        1040
+#define IDC_BTN_NEXT        1041
+#define IDC_BTN_TOGGLE_PL   1042
+#define IDC_LIST_PLAYLIST   1043
+#define IDC_LBL_PL_TITLE    1044
+#define IDC_BTN_PL_CLOSE    1045
 
 /* Timer ID */
 #define IDT_PLAYBACK_TIMER  1

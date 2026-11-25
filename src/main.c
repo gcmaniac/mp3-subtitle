@@ -2,14 +2,18 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <mmsystem.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
+#include "icons_data.h"
 #include "player.h"
+#include "playlist.h"
 #include "prefs.h"
 #include "resource.h"
 #include "srt.h"
@@ -37,13 +41,30 @@ typedef struct SubSlot {
 typedef struct AppState {
     HWND hwnd;
     HWND btn_open;
+    HWND btn_prev;
     HWND btn_play;
     HWND btn_stop;
+    HWND btn_next;
+    HWND chk_autonext;
+    HWND btn_toggle_playlist;
     HWND slider_seek;
     HWND label_time;
     HWND chk_remember;
     HWND label_vol;
     HWND slider_vol;
+
+    HWND lbl_playlist_title;
+    HWND btn_close_playlist;
+    HWND list_playlist;
+
+    HICON icon_open;
+    HICON icon_prev;
+    HICON icon_play;
+    HICON icon_pause;
+    HICON icon_stop;
+    HICON icon_next;
+    HICON icon_playlist;
+    HICON icon_close;
 
     SubSlot slots[SUB_SLOT_COUNT];
 
@@ -51,10 +72,15 @@ typedef struct AppState {
     UINT dpi;
 
     Mp3Player player;
+    Playlist playlist;
     SrtTrackList tracks;
 
     bool is_seeking;
     bool remember_pos;
+    bool auto_next;
+    bool show_playlist;
+    bool user_stopped;
+    bool track_ended_handled;
     long long preview_seek_ms;
     long long display_pos_ms;
     long long display_dur_ms;
@@ -66,8 +92,23 @@ typedef struct AppState {
 
 static AppState g_app;
 
+static void open_audio_file(const wchar_t *audio_path);
+static void on_track_ended(void);
+static void play_prev_audio_file(void);
+static void play_next_audio_file(void);
+static void toggle_playlist_visibility(void);
+static void update_playlist_ui(void);
+static int get_playlist_width(void);
+static void layout_controls(void);
+static void recreate_button_icons(void);
+static void create_main_menu(HWND hwnd);
+
 static int scale_dpi(int px) {
     return MulDiv(px, (int)g_app.dpi, 96);
+}
+
+static int get_playlist_width(void) {
+    return g_app.show_playlist ? scale_dpi(250) : 0;
 }
 
 static int get_stage_height(HWND hwnd) {
@@ -122,10 +163,9 @@ static void update_window_title(void) {
 }
 
 static void update_play_button_text(void) {
-    if (g_app.player.state == PLAYER_PLAYING) {
-        SetWindowTextW(g_app.btn_play, L"Pause");
-    } else {
-        SetWindowTextW(g_app.btn_play, L"Play");
+    if (g_app.btn_play) {
+        HICON icon = (g_app.player.state == PLAYER_PLAYING) ? g_app.icon_pause : g_app.icon_play;
+        SendMessageW(g_app.btn_play, BM_SETIMAGE, IMAGE_ICON, (LPARAM)icon);
     }
 }
 
@@ -133,6 +173,7 @@ static void invalidate_stage(void) {
     RECT rc;
     GetClientRect(g_app.hwnd, &rc);
     rc.bottom = get_stage_height(g_app.hwnd);
+    rc.right = rc.right - rc.left - get_playlist_width();
     InvalidateRect(g_app.hwnd, &rc, FALSE);
 }
 
@@ -143,6 +184,7 @@ static void invalidate_stage_header(void) {
     int header_h = scale_dpi(46);
     if (stage_h < header_h) header_h = stage_h;
     rc.bottom = header_h;
+    rc.right = rc.right - rc.left - get_playlist_width();
     InvalidateRect(g_app.hwnd, &rc, FALSE);
 }
 
@@ -171,6 +213,11 @@ static void update_time_and_subtitle(void) {
             invalidate_stage();
             if (g_app.player.state == PLAYER_STOPPED) {
                 save_current_position(true);
+                if (prev_state == PLAYER_PLAYING && !g_app.user_stopped &&
+                    g_app.player.duration_ms > 0 &&
+                    g_app.display_pos_ms >= g_app.player.duration_ms - 1500) {
+                    on_track_ended();
+                }
             }
         }
         dur = g_app.player.duration_ms;
@@ -187,13 +234,16 @@ static void update_time_and_subtitle(void) {
     g_app.display_pos_ms = pos;
     g_app.display_dur_ms = dur;
 
-    wchar_t cur_str[32], dur_str[32], label_str[80];
+    long long rem = (dur > pos) ? (dur - pos) : 0;
+    wchar_t rem_str[32], cur_str[32], dur_str[32], label_str[96];
+    format_time_ms(rem, rem_str, 32);
     format_time_ms(pos, cur_str, 32);
     format_time_ms(dur, dur_str, 32);
-    _snwprintf(label_str, 80, L"%ls / %ls", cur_str, dur_str);
+    _snwprintf(label_str, sizeof(label_str) / sizeof(label_str[0]),
+               L"%ls / %ls / %ls", rem_str, cur_str, dur_str);
 
-    wchar_t old_label[80] = {0};
-    GetWindowTextW(g_app.label_time, old_label, 80);
+    wchar_t old_label[96] = {0};
+    GetWindowTextW(g_app.label_time, old_label, 96);
     if (wcscmp(old_label, label_str) != 0) {
         SetWindowTextW(g_app.label_time, label_str);
         invalidate_stage_header();
@@ -283,12 +333,18 @@ static void open_audio_file(const wchar_t *audio_path) {
     }
     save_current_position(true);
 
+    g_app.user_stopped = false;
+    g_app.track_ended_handled = false;
+
     if (!player_open(&g_app.player, audio_path)) {
         MessageBoxW(g_app.hwnd,
                     g_app.player.last_error[0] ? g_app.player.last_error : L"Failed to open audio file.",
                     L"Playback Error", MB_OK | MB_ICONERROR);
         return;
     }
+
+    playlist_scan_folder(&g_app.playlist, audio_path);
+    update_playlist_ui();
 
     for (int i = 0; i < SUB_SLOT_COUNT; i++) {
         clear_slot_subtitle(i);
@@ -308,6 +364,8 @@ static void open_audio_file(const wchar_t *audio_path) {
 
     EnableWindow(g_app.btn_play, TRUE);
     EnableWindow(g_app.btn_stop, TRUE);
+    EnableWindow(g_app.btn_prev, TRUE);
+    EnableWindow(g_app.btn_next, TRUE);
     EnableWindow(g_app.slider_seek, TRUE);
 
     long long resume_ms = 0;
@@ -324,10 +382,119 @@ static void open_audio_file(const wchar_t *audio_path) {
     }
     g_app.last_save_tick = GetTickCount();
 
+    prefs_add_history(audio_path);
+    create_main_menu(g_app.hwnd);
+
     update_play_button_text();
     update_window_title();
     update_time_and_subtitle();
     invalidate_stage();
+}
+
+static void on_track_ended(void) {
+    if (g_app.track_ended_handled) {
+        return;
+    }
+    g_app.track_ended_handled = true;
+
+    if (g_app.user_stopped) {
+        return;
+    }
+
+    if (g_app.auto_next && g_app.player.is_open) {
+        wchar_t next_path[MAX_PATH];
+        if (player_find_next_audio_file(g_app.player.current_path, next_path, MAX_PATH)) {
+            open_audio_file(next_path);
+            return;
+        }
+    }
+
+    /* Last file in folder or auto-next disabled: perform a clean stop & rewind to start */
+    if (g_app.player.is_open) {
+        player_stop(&g_app.player);
+        if (g_app.remember_pos) {
+            prefs_save_file_position(g_app.player.current_path, 0);
+        }
+    }
+    update_play_button_text();
+    update_time_and_subtitle();
+    invalidate_stage();
+}
+
+static void update_playlist_ui(void) {
+    if (!g_app.list_playlist) return;
+
+    wchar_t title_buf[64];
+    _snwprintf(title_buf, sizeof(title_buf) / sizeof(title_buf[0]),
+               L"Playlist (%d)", (int)g_app.playlist.count);
+    if (g_app.lbl_playlist_title) {
+        SetWindowTextW(g_app.lbl_playlist_title, title_buf);
+    }
+
+    int cur_count = (int)SendMessageW(g_app.list_playlist, LB_GETCOUNT, 0, 0);
+    if (cur_count != (int)g_app.playlist.count) {
+        SendMessageW(g_app.list_playlist, WM_SETREDRAW, FALSE, 0);
+        SendMessageW(g_app.list_playlist, LB_RESETCONTENT, 0, 0);
+        for (size_t i = 0; i < g_app.playlist.count; i++) {
+            SendMessageW(g_app.list_playlist, LB_ADDSTRING, 0, (LPARAM)g_app.playlist.names[i]);
+        }
+        SendMessageW(g_app.list_playlist, WM_SETREDRAW, TRUE, 0);
+    }
+
+    if (g_app.playlist.current_index >= 0) {
+        SendMessageW(g_app.list_playlist, LB_SETCURSEL, (WPARAM)g_app.playlist.current_index, 0);
+        int top = g_app.playlist.current_index > 3 ? g_app.playlist.current_index - 3 : 0;
+        SendMessageW(g_app.list_playlist, LB_SETTOPINDEX, (WPARAM)top, 0);
+    }
+}
+
+static void toggle_playlist_visibility(void) {
+    g_app.show_playlist = !g_app.show_playlist;
+    prefs_set_show_playlist(g_app.show_playlist);
+
+    int sw = g_app.show_playlist ? SW_SHOW : SW_HIDE;
+    if (g_app.lbl_playlist_title) ShowWindow(g_app.lbl_playlist_title, sw);
+    if (g_app.btn_close_playlist) ShowWindow(g_app.btn_close_playlist, sw);
+    if (g_app.list_playlist) ShowWindow(g_app.list_playlist, sw);
+
+    HMENU hMenu = GetMenu(g_app.hwnd);
+    if (hMenu) {
+        CheckMenuItem(hMenu, IDM_VIEW_PLAYLIST,
+                      MF_BYCOMMAND | (g_app.show_playlist ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    layout_controls();
+    InvalidateRect(g_app.hwnd, NULL, TRUE);
+}
+
+static void play_prev_audio_file(void) {
+    if (!g_app.player.is_open) return;
+    wchar_t prev_path[MAX_PATH];
+    if (player_find_prev_audio_file(g_app.player.current_path, prev_path, MAX_PATH)) {
+        open_audio_file(prev_path);
+    } else {
+        /* Rewind to start if already on the first file */
+        player_seek(&g_app.player, 0);
+        save_current_position(false);
+        update_time_and_subtitle();
+    }
+}
+
+static void play_next_audio_file(void) {
+    if (!g_app.player.is_open) return;
+    wchar_t next_path[MAX_PATH];
+    if (player_find_next_audio_file(g_app.player.current_path, next_path, MAX_PATH)) {
+        open_audio_file(next_path);
+    } else {
+        /* Stop and rewind to start if on the last file */
+        player_stop(&g_app.player);
+        if (g_app.remember_pos) {
+            prefs_save_file_position(g_app.player.current_path, 0);
+        }
+        update_play_button_text();
+        update_time_and_subtitle();
+        invalidate_stage();
+    }
 }
 
 static void show_open_audio_dialog(void) {
@@ -337,7 +504,8 @@ static void show_open_audio_dialog(void) {
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_app.hwnd;
     ofn.lpstrFilter =
-        L"All Supported Audio Files (*.mp3;*.wav;*.wma;*.m4a;*.aac;*.flac;*.ogg;*.mid;...)\0*.mp3;*.wav;*.wma;*.m4a;*.aac;*.flac;*.ogg;*.oga;*.opus;*.mid;*.midi;*.aif;*.aiff;*.mp2;*.mpa\0"
+        L"All Supported Audio Files (*.mp3;*.ogg;*.wav;*.wma;*.m4a;*.aac;*.flac;...)\0*.mp3;*.ogg;*.oga;*.opus;*.wav;*.wma;*.m4a;*.aac;*.flac;*.mid;*.midi;*.aif;*.aiff;*.mp2;*.mpa\0"
+        L"OGG Audio (*.ogg)\0*.ogg\0"
         L"MP3 Audio (*.mp3)\0*.mp3\0"
         L"Waveform Audio (*.wav)\0*.wav\0"
         L"Windows Media Audio (*.wma)\0*.wma\0"
@@ -408,7 +576,9 @@ static void recreate_ui_font(void) {
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HWND ctrls[] = {
-        g_app.btn_open, g_app.btn_play, g_app.btn_stop,
+        g_app.btn_open, g_app.btn_play, g_app.btn_stop, g_app.chk_autonext,
+        g_app.btn_toggle_playlist, g_app.lbl_playlist_title, g_app.btn_close_playlist,
+        g_app.list_playlist,
         g_app.label_time, g_app.chk_remember, g_app.label_vol,
         g_app.slots[0].label, g_app.slots[0].combo, g_app.slots[0].btn_load,
         g_app.slots[1].label, g_app.slots[1].combo, g_app.slots[1].btn_load,
@@ -425,7 +595,14 @@ static void layout_controls(void) {
     RECT rc;
     GetClientRect(g_app.hwnd, &rc);
     int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
     int stage_h = get_stage_height(g_app.hwnd);
+
+    int pl_w = get_playlist_width();
+    int main_w = w - pl_w;
+    if (main_w < scale_dpi(480)) {
+        main_w = scale_dpi(480);
+    }
 
     int pad = scale_dpi(12);
     int gap = scale_dpi(8);
@@ -433,9 +610,9 @@ static void layout_controls(void) {
     /* Row 1: Seek bar + time label + remember-position checkbox */
     int row1_y = stage_h + scale_dpi(10);
     int row1_h = scale_dpi(28);
-    int time_w = scale_dpi(125);
+    int time_w = scale_dpi(175);
     int chk_w = scale_dpi(118);
-    int seek_w = w - pad * 2 - time_w - chk_w - gap * 2;
+    int seek_w = main_w - pad * 2 - time_w - chk_w - gap * 2;
     if (seek_w < scale_dpi(100)) seek_w = scale_dpi(100);
 
     MoveWindow(g_app.slider_seek, pad, row1_y, seek_w, row1_h, TRUE);
@@ -446,30 +623,50 @@ static void layout_controls(void) {
 
     /* Row 2: Transport buttons on left, Volume on right */
     int row2_y = stage_h + scale_dpi(44);
-    int btn_h = scale_dpi(30);
+    int btn_h = scale_dpi(32);
     int x = pad;
-    int w_open = scale_dpi(96);
-    int w_play = scale_dpi(84);
-    int w_stop = scale_dpi(72);
+    int w_btn = scale_dpi(36);
+    int w_play = scale_dpi(44);
+    int gap_btn = scale_dpi(4);
+    int group_gap = scale_dpi(10);
+    int w_autonext = scale_dpi(92);
 
-    MoveWindow(g_app.btn_open, x, row2_y, w_open, btn_h, TRUE);
-    x += w_open + scale_dpi(6);
+    /* Open */
+    MoveWindow(g_app.btn_open, x, row2_y, w_btn, btn_h, TRUE);
+    x += w_btn + group_gap;
+
+    /* Prev, Play, Stop, Next */
+    MoveWindow(g_app.btn_prev, x, row2_y, w_btn, btn_h, TRUE);
+    x += w_btn + gap_btn;
+
     MoveWindow(g_app.btn_play, x, row2_y, w_play, btn_h, TRUE);
-    x += w_play + scale_dpi(6);
-    MoveWindow(g_app.btn_stop, x, row2_y, w_stop, btn_h, TRUE);
+    x += w_play + gap_btn;
+
+    MoveWindow(g_app.btn_stop, x, row2_y, w_btn, btn_h, TRUE);
+    x += w_btn + gap_btn;
+
+    MoveWindow(g_app.btn_next, x, row2_y, w_btn, btn_h, TRUE);
+    x += w_btn + group_gap;
+
+    /* Playlist toggle */
+    MoveWindow(g_app.btn_toggle_playlist, x, row2_y, w_btn, btn_h, TRUE);
+    x += w_btn + group_gap;
+
+    /* Auto next checkbox */
+    MoveWindow(g_app.chk_autonext, x, row2_y + scale_dpi(4), w_autonext, scale_dpi(24), TRUE);
 
     int w_vol_lbl = scale_dpi(34);
     int w_vol_slider = scale_dpi(140);
-    int vol_x = w - pad - w_vol_slider;
+    int vol_x = main_w - pad - w_vol_slider;
     int vol_lbl_x = vol_x - w_vol_lbl - scale_dpi(4);
 
-    MoveWindow(g_app.label_vol, vol_lbl_x, row2_y + scale_dpi(3), w_vol_lbl, scale_dpi(24), TRUE);
-    MoveWindow(g_app.slider_vol, vol_x, row2_y + scale_dpi(1), w_vol_slider, scale_dpi(28), TRUE);
+    MoveWindow(g_app.label_vol, vol_lbl_x, row2_y + scale_dpi(4), w_vol_lbl, scale_dpi(24), TRUE);
+    MoveWindow(g_app.slider_vol, vol_x, row2_y + scale_dpi(2), w_vol_slider, scale_dpi(28), TRUE);
 
     /* Row 3: Three equal columns for Primary (Center), Secondary (Bottom), Tertiary (Top) */
     int row3_y = stage_h + scale_dpi(84);
     int col_gap = scale_dpi(12);
-    int total_w = w - pad * 2 - col_gap * 2;
+    int total_w = main_w - pad * 2 - col_gap * 2;
     int col_w = total_w / 3;
     if (col_w < scale_dpi(180)) col_w = scale_dpi(180);
 
@@ -485,6 +682,23 @@ static void layout_controls(void) {
                    combo_w, scale_dpi(220), TRUE);
         MoveWindow(g_app.slots[i].btn_load, cx + w_lbl + scale_dpi(4) + combo_w + scale_dpi(4),
                    row3_y, w_browse, btn_h, TRUE);
+    }
+
+    /* Playlist sidebar controls */
+    if (g_app.show_playlist) {
+        int pl_x = main_w + scale_dpi(1);
+        int pl_actual_w = w - pl_x;
+        if (pl_actual_w > 0) {
+            MoveWindow(g_app.lbl_playlist_title,
+                       pl_x + scale_dpi(8), scale_dpi(6),
+                       pl_actual_w - scale_dpi(42), scale_dpi(24), TRUE);
+            MoveWindow(g_app.btn_close_playlist,
+                       pl_x + pl_actual_w - scale_dpi(30), scale_dpi(6),
+                       scale_dpi(24), scale_dpi(24), TRUE);
+            MoveWindow(g_app.list_playlist,
+                       pl_x + scale_dpi(4), scale_dpi(34),
+                       pl_actual_w - scale_dpi(8), h - scale_dpi(38), TRUE);
+        }
     }
 }
 
@@ -602,18 +816,22 @@ static void paint_stage(HDC hdc, int w, int stage_h) {
             const wchar_t *state_tag =
                 (g_app.player.state == PLAYER_PLAYING) ? L"PLAYING" :
                 (g_app.player.state == PLAYER_PAUSED) ? L"PAUSED" : L"STOPPED";
-            wchar_t cur_t[32], dur_t[32];
+            long long rem_ms = (g_app.display_dur_ms > g_app.display_pos_ms)
+                                   ? (g_app.display_dur_ms - g_app.display_pos_ms)
+                                   : 0;
+            wchar_t rem_t[32], cur_t[32], dur_t[32];
+            format_time_ms(rem_ms, rem_t, 32);
             format_time_ms(g_app.display_pos_ms, cur_t, 32);
             format_time_ms(g_app.display_dur_ms, dur_t, 32);
             wchar_t left_txt[MAX_PATH + 96];
             _snwprintf(left_txt, sizeof(left_txt) / sizeof(left_txt[0]),
-                       L"[%ls]  %ls / %ls  |  %ls",
-                       state_tag, cur_t, dur_t,
+                       L"[%ls]  %ls / %ls / %ls  |  %ls",
+                       state_tag, rem_t, cur_t, dur_t,
                        get_filename_part(g_app.player.current_path));
             DrawTextW(mem_dc, left_txt, -1, &left_rc,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         } else {
-            DrawTextW(mem_dc, L"Audio Subtitle Player  |  00:00 / 00:00", -1, &left_rc,
+            DrawTextW(mem_dc, L"Audio Subtitle Player  |  00:00 / 00:00 / 00:00", -1, &left_rc,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
 
@@ -733,6 +951,37 @@ static void create_main_menu(HWND hwnd) {
     HMENU hPlay = CreatePopupMenu();
 
     AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open Audio...\tCtrl+O");
+
+    /* Submenu for Recent Files / History reminder */
+    HMENU hRecent = CreatePopupMenu();
+    int hist_count = prefs_get_history_count();
+    if (hist_count == 0) {
+        AppendMenuW(hRecent, MF_STRING | MF_GRAYED, 0, L"(No Recent History)");
+    } else {
+        for (int i = 0; i < hist_count; i++) {
+            wchar_t r_path[MAX_PATH] = {0};
+            if (prefs_get_history_item(i, r_path, MAX_PATH)) {
+                const wchar_t *fn = get_filename_part(r_path);
+                long long saved_pos = prefs_load_file_position(r_path);
+                wchar_t item_text[MAX_PATH + 64];
+                int num = (i + 1) % 10;
+                if (saved_pos > 0) {
+                    wchar_t pos_str[32];
+                    format_time_ms(saved_pos, pos_str, 32);
+                    _snwprintf(item_text, sizeof(item_text) / sizeof(item_text[0]),
+                               L"&%d. %ls  [Pos: %ls]", num, fn, pos_str);
+                } else {
+                    _snwprintf(item_text, sizeof(item_text) / sizeof(item_text[0]),
+                               L"&%d. %ls", num, fn);
+                }
+                AppendMenuW(hRecent, MF_STRING, IDM_FILE_RECENT_BASE + i, item_text);
+            }
+        }
+        AppendMenuW(hRecent, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(hRecent, MF_STRING, IDM_FILE_CLEAR_RECENT, L"&Clear History");
+    }
+    AppendMenuW(hFile, MF_POPUP, (UINT_PTR)hRecent, L"Recent &History (Pengingat Riwayat)");
+
     AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hFile, MF_STRING, IDM_FILE_LOADPRI, L"Load &Primary Subtitle (.srt)...");
     AppendMenuW(hFile, MF_STRING, IDM_FILE_LOADSEC, L"Load &Secondary Subtitle (.srt)...");
@@ -743,26 +992,236 @@ static void create_main_menu(HWND hwnd) {
     AppendMenuW(hPlay, MF_STRING, IDM_PLAY_TOGGLE, L"&Play / Pause\tSpace");
     AppendMenuW(hPlay, MF_STRING, IDM_PLAY_STOP, L"&Stop");
     AppendMenuW(hPlay, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hPlay, MF_STRING, IDM_PLAY_PREVFILE, L"Pre&vious File\tCtrl+Left");
+    AppendMenuW(hPlay, MF_STRING, IDM_PLAY_NEXTFILE, L"Ne&xt File\tCtrl+Right");
+    AppendMenuW(hPlay, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hPlay, MF_STRING, IDM_PLAY_BACK5, L"Seek &Backward 5s\tLeft");
     AppendMenuW(hPlay, MF_STRING, IDM_PLAY_FWD5, L"Seek &Forward 5s\tRight");
 
+    HMENU hView = CreatePopupMenu();
+    AppendMenuW(hView, MF_STRING | (g_app.show_playlist ? MF_CHECKED : MF_UNCHECKED),
+                IDM_VIEW_PLAYLIST, L"&Playlist\tCtrl+P");
+
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hFile, L"&File");
     AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hPlay, L"&Playback");
+    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hView, L"&View");
+
+    HMENU oldMenu = GetMenu(hwnd);
     SetMenu(hwnd, hMenu);
+    if (oldMenu) {
+        DestroyMenu(oldMenu);
+    }
+}
+
+static HICON create_icon_from_mask_32(const unsigned char *mask_32, int target_sz) {
+    if (target_sz < 8) target_sz = 8;
+    HDC hdc_screen = GetDC(NULL);
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = target_sz;
+    bi.bmiHeader.biHeight = target_sz; /* bottom-up DIB */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    RGBQUAD *pixels = NULL;
+    HBITMAP hColor = CreateDIBSection(hdc_screen, &bi, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+    ReleaseDC(NULL, hdc_screen);
+    if (!hColor || !pixels) return NULL;
+
+    COLORREF text_color = GetSysColor(COLOR_BTNTEXT);
+    BYTE r = GetRValue(text_color);
+    BYTE g = GetGValue(text_color);
+    BYTE b = GetBValue(text_color);
+
+    for (int y = 0; y < target_sz; y++) {
+        int dib_y = target_sz - 1 - y;
+        float sy = ((float)y + 0.5f) * 32.0f / (float)target_sz - 0.5f;
+        if (sy < 0.0f) sy = 0.0f;
+        if (sy > 31.0f) sy = 31.0f;
+        int y0 = (int)sy;
+        int y1 = (y0 < 31) ? y0 + 1 : 31;
+        float fy = sy - (float)y0;
+
+        for (int x = 0; x < target_sz; x++) {
+            float sx = ((float)x + 0.5f) * 32.0f / (float)target_sz - 0.5f;
+            if (sx < 0.0f) sx = 0.0f;
+            if (sx > 31.0f) sx = 31.0f;
+            int x0 = (int)sx;
+            int x1 = (x0 < 31) ? x0 + 1 : 31;
+            float fx = sx - (float)x0;
+
+            float v00 = (float)mask_32[y0 * 32 + x0];
+            float v01 = (float)mask_32[y0 * 32 + x1];
+            float v10 = (float)mask_32[y1 * 32 + x0];
+            float v11 = (float)mask_32[y1 * 32 + x1];
+
+            float v0 = v00 + fx * (v01 - v00);
+            float v1 = v10 + fx * (v11 - v10);
+            float val = v0 + fy * (v1 - v0);
+            if (val < 0.0f) val = 0.0f;
+            if (val > 255.0f) val = 255.0f;
+            BYTE a = (BYTE)(val + 0.5f);
+
+            RGBQUAD *p = &pixels[dib_y * target_sz + x];
+            p->rgbRed   = (BYTE)((r * a) / 255);
+            p->rgbGreen = (BYTE)((g * a) / 255);
+            p->rgbBlue  = (BYTE)((b * a) / 255);
+            p->rgbReserved = a;
+        }
+    }
+
+    HBITMAP hMask = CreateBitmap(target_sz, target_sz, 1, 1, NULL);
+    ICONINFO ii = {0};
+    ii.fIcon = TRUE;
+    ii.hbmColor = hColor;
+    ii.hbmMask = hMask;
+    HICON hIcon = CreateIconIndirect(&ii);
+
+    DeleteObject(hColor);
+    DeleteObject(hMask);
+    return hIcon;
+}
+
+static void recreate_button_icons(void) {
+    if (g_app.icon_open)     { DestroyIcon(g_app.icon_open);     g_app.icon_open = NULL; }
+    if (g_app.icon_prev)     { DestroyIcon(g_app.icon_prev);     g_app.icon_prev = NULL; }
+    if (g_app.icon_play)     { DestroyIcon(g_app.icon_play);     g_app.icon_play = NULL; }
+    if (g_app.icon_pause)    { DestroyIcon(g_app.icon_pause);    g_app.icon_pause = NULL; }
+    if (g_app.icon_stop)     { DestroyIcon(g_app.icon_stop);     g_app.icon_stop = NULL; }
+    if (g_app.icon_next)     { DestroyIcon(g_app.icon_next);     g_app.icon_next = NULL; }
+    if (g_app.icon_playlist) { DestroyIcon(g_app.icon_playlist); g_app.icon_playlist = NULL; }
+    if (g_app.icon_close)    { DestroyIcon(g_app.icon_close);    g_app.icon_close = NULL; }
+
+    int sz = scale_dpi(18);
+    if (sz < 14) sz = 14;
+
+    int sz_close = scale_dpi(12);
+    if (sz_close < 10) sz_close = 10;
+
+    g_app.icon_open     = create_icon_from_mask_32(g_icon_open_32, sz);
+    g_app.icon_prev     = create_icon_from_mask_32(g_icon_prev_32, sz);
+    g_app.icon_play     = create_icon_from_mask_32(g_icon_play_32, sz);
+    g_app.icon_pause    = create_icon_from_mask_32(g_icon_pause_32, sz);
+    g_app.icon_stop     = create_icon_from_mask_32(g_icon_stop_32, sz);
+    g_app.icon_next     = create_icon_from_mask_32(g_icon_next_32, sz);
+    g_app.icon_playlist = create_icon_from_mask_32(g_icon_playlist_32, sz);
+    g_app.icon_close    = create_icon_from_mask_32(g_icon_close_32, sz_close);
+
+    if (g_app.btn_open) {
+        SendMessageW(g_app.btn_open, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_open);
+    }
+    if (g_app.btn_prev) {
+        SendMessageW(g_app.btn_prev, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_prev);
+    }
+    if (g_app.btn_play) {
+        HICON cur_play = (g_app.player.state == PLAYER_PLAYING) ? g_app.icon_pause : g_app.icon_play;
+        SendMessageW(g_app.btn_play, BM_SETIMAGE, IMAGE_ICON, (LPARAM)cur_play);
+    }
+    if (g_app.btn_stop) {
+        SendMessageW(g_app.btn_stop, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_stop);
+    }
+    if (g_app.btn_next) {
+        SendMessageW(g_app.btn_next, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_next);
+    }
+    if (g_app.btn_toggle_playlist) {
+        SendMessageW(g_app.btn_toggle_playlist, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_playlist);
+    }
+    if (g_app.btn_close_playlist) {
+        SendMessageW(g_app.btn_close_playlist, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.icon_close);
+    }
+}
+
+static void init_tooltips(HWND hwnd) {
+    HWND hwnd_tip = CreateWindowExW(0, TOOLTIPS_CLASSW, NULL,
+                                    WS_POPUP | TTS_ALWAYSTIP,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    CW_USEDEFAULT, CW_USEDEFAULT,
+                                    hwnd, NULL, (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE), NULL);
+    if (!hwnd_tip) return;
+
+    TOOLINFOW ti = {0};
+    ti.cbSize = sizeof(TOOLINFOW);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = hwnd;
+
+    ti.uId = (UINT_PTR)g_app.btn_open;
+    ti.lpszText = (LPWSTR)L"Open Audio (Ctrl+O)";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_prev;
+    ti.lpszText = (LPWSTR)L"Previous File (Ctrl+Left)";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_play;
+    ti.lpszText = (LPWSTR)L"Play / Pause (Space)";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_stop;
+    ti.lpszText = (LPWSTR)L"Stop";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_next;
+    ti.lpszText = (LPWSTR)L"Next File (Ctrl+Right)";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_toggle_playlist;
+    ti.lpszText = (LPWSTR)L"Toggle Playlist (Ctrl+P)";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.chk_autonext;
+    ti.lpszText = (LPWSTR)L"Play next file in folder automatically";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+    ti.uId = (UINT_PTR)g_app.btn_close_playlist;
+    ti.lpszText = (LPWSTR)L"Close Playlist";
+    SendMessageW(hwnd_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
 static void create_controls(HWND hwnd) {
     HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
 
-    g_app.btn_open = CreateWindowExW(0, L"BUTTON", L"Open Audio",
-                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    g_app.btn_open = CreateWindowExW(0, L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON,
                                      0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_OPEN, hInst, NULL);
-    g_app.btn_play = CreateWindowExW(0, L"BUTTON", L"Play",
-                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+    g_app.btn_prev = CreateWindowExW(0, L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON | WS_DISABLED,
+                                     0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_PREV, hInst, NULL);
+    g_app.btn_play = CreateWindowExW(0, L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON | WS_DISABLED,
                                      0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_PLAYPAUSE, hInst, NULL);
-    g_app.btn_stop = CreateWindowExW(0, L"BUTTON", L"Stop",
-                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+    g_app.btn_stop = CreateWindowExW(0, L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON | WS_DISABLED,
                                      0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_STOP, hInst, NULL);
+    g_app.btn_next = CreateWindowExW(0, L"BUTTON", L"",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON | WS_DISABLED,
+                                     0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_NEXT, hInst, NULL);
+
+    g_app.chk_autonext = CreateWindowExW(0, L"BUTTON", L"Auto next",
+                                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                         0, 0, 0, 0, hwnd, (HMENU)IDC_CHK_AUTONEXT, hInst, NULL);
+    SendMessageW(g_app.chk_autonext, BM_SETCHECK,
+                 g_app.auto_next ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    g_app.btn_toggle_playlist = CreateWindowExW(0, L"BUTTON", L"",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON,
+                                                0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_TOGGLE_PL, hInst, NULL);
+
+    int sw = g_app.show_playlist ? SW_SHOW : SW_HIDE;
+    g_app.lbl_playlist_title = CreateWindowExW(0, L"STATIC", L"Playlist",
+                                               WS_CHILD | sw | SS_LEFT | SS_CENTERIMAGE,
+                                               0, 0, 0, 0, hwnd, (HMENU)IDC_LBL_PL_TITLE, hInst, NULL);
+
+    g_app.btn_close_playlist = CreateWindowExW(0, L"BUTTON", L"",
+                                               WS_CHILD | sw | BS_PUSHBUTTON | BS_ICON,
+                                               0, 0, 0, 0, hwnd, (HMENU)IDC_BTN_PL_CLOSE, hInst, NULL);
+
+    recreate_button_icons();
+    init_tooltips(hwnd);
+
+    g_app.list_playlist = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                                          WS_CHILD | sw | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+                                          0, 0, 0, 0, hwnd, (HMENU)IDC_LIST_PLAYLIST, hInst, NULL);
 
     g_app.slider_seek = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
                                         WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS | WS_DISABLED,
@@ -771,7 +1230,7 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_app.slider_seek, TBM_SETRANGEMAX, TRUE, 10000);
     trackbar_attach_click_seek(g_app.slider_seek, &g_app.seek_drag);
 
-    g_app.label_time = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00",
+    g_app.label_time = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00 / 00:00",
                                        WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE,
                                        0, 0, 0, 0, hwnd, (HMENU)IDC_LABEL_TIME, hInst, NULL);
     g_app.chk_remember = CreateWindowExW(0, L"BUTTON", L"Remember pos",
@@ -833,6 +1292,8 @@ static void adjust_volume(int delta) {
 
 static void seek_relative(long long delta_ms) {
     if (!g_app.player.is_open) return;
+    g_app.user_stopped = false;
+    g_app.track_ended_handled = false;
     long long pos = player_get_position(&g_app.player) + delta_ms;
     player_seek(&g_app.player, pos);
     save_current_position(false);
@@ -843,6 +1304,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     switch (msg) {
     case WM_CREATE:
         g_app.hwnd = hwnd;
+        player_set_callback(&g_app.player, hwnd);
         g_app.dpi = GetDpiForWindow(hwnd);
         if (g_app.dpi == 0) g_app.dpi = 96;
         create_main_menu(hwnd);
@@ -859,9 +1321,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    case WM_SYSCOLORCHANGE:
+        recreate_button_icons();
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+
     case WM_DPICHANGED: {
         g_app.dpi = HIWORD(wParam);
         recreate_ui_font();
+        recreate_button_icons();
         RECT *suggested = (RECT *)lParam;
         SetWindowPos(hwnd, NULL,
                      suggested->left, suggested->top,
@@ -896,16 +1364,28 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
         int stage_h = get_stage_height(hwnd);
+        int pl_w = get_playlist_width();
+        int main_w = w - pl_w;
+        if (main_w < scale_dpi(480)) main_w = scale_dpi(480);
 
-        paint_stage(hdc, w, stage_h);
+        paint_stage(hdc, main_w, stage_h);
 
-        RECT panel_rc = {0, stage_h, w, h};
+        RECT panel_rc = {0, stage_h, main_w, h};
         FillRect(hdc, &panel_rc, GetSysColorBrush(COLOR_BTNFACE));
 
         HPEN top_pen = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DSHADOW));
         HPEN old_pen = (HPEN)SelectObject(hdc, top_pen);
         MoveToEx(hdc, 0, stage_h, NULL);
-        LineTo(hdc, w, stage_h);
+        LineTo(hdc, main_w, stage_h);
+
+        if (g_app.show_playlist) {
+            RECT pl_rc = {main_w, 0, w, h};
+            FillRect(hdc, &pl_rc, GetSysColorBrush(COLOR_BTNFACE));
+
+            MoveToEx(hdc, main_w, 0, NULL);
+            LineTo(hdc, main_w, h);
+        }
+
         SelectObject(hdc, old_pen);
         DeleteObject(top_pen);
 
@@ -916,6 +1396,12 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_TIMER:
         if (wParam == IDT_PLAYBACK_TIMER) {
             update_time_and_subtitle();
+        }
+        return 0;
+
+    case MM_MCINOTIFY:
+        if (wParam == MCI_NOTIFY_SUCCESSFUL) {
+            on_track_ended();
         }
         return 0;
 
@@ -990,6 +1476,14 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         WORD id = LOWORD(wParam);
         WORD notify = HIWORD(wParam);
 
+        if (notify == LBN_DBLCLK && id == IDC_LIST_PLAYLIST) {
+            int sel = (int)SendMessageW(g_app.list_playlist, LB_GETCURSEL, 0, 0);
+            if (sel >= 0 && (size_t)sel < g_app.playlist.count) {
+                open_audio_file(g_app.playlist.paths[sel]);
+            }
+            return 0;
+        }
+
         if (notify == CBN_SELCHANGE) {
             if (id == IDC_COMBO_SUB_PRI) {
                 on_slot_combo_changed(SUB_PRIMARY);
@@ -1006,10 +1500,51 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
         }
 
+        if (id >= IDM_FILE_RECENT_BASE && id < IDM_FILE_RECENT_BASE + PREFS_MAX_HISTORY) {
+            int idx = id - IDM_FILE_RECENT_BASE;
+            wchar_t recent_path[MAX_PATH] = {0};
+            if (prefs_get_history_item(idx, recent_path, MAX_PATH)) {
+                if (GetFileAttributesW(recent_path) == INVALID_FILE_ATTRIBUTES) {
+                    MessageBoxW(hwnd, L"File does not exist or has been moved.",
+                                L"File Not Found", MB_OK | MB_ICONWARNING);
+                } else {
+                    open_audio_file(recent_path);
+                }
+            }
+            SetFocus(hwnd);
+            return 0;
+        }
+
+        if (id == IDM_FILE_CLEAR_RECENT) {
+            prefs_clear_history();
+            create_main_menu(hwnd);
+            SetFocus(hwnd);
+            return 0;
+        }
+
         switch (id) {
         case IDC_BTN_OPEN:
         case IDM_FILE_OPEN:
             show_open_audio_dialog();
+            SetFocus(hwnd);
+            return 0;
+
+        case IDC_BTN_TOGGLE_PL:
+        case IDM_VIEW_PLAYLIST:
+        case IDC_BTN_PL_CLOSE:
+            toggle_playlist_visibility();
+            SetFocus(hwnd);
+            return 0;
+
+        case IDC_BTN_PREV:
+        case IDM_PLAY_PREVFILE:
+            play_prev_audio_file();
+            SetFocus(hwnd);
+            return 0;
+
+        case IDC_BTN_NEXT:
+        case IDM_PLAY_NEXTFILE:
+            play_next_audio_file();
             SetFocus(hwnd);
             return 0;
 
@@ -1041,9 +1576,18 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SetFocus(hwnd);
             return 0;
 
+        case IDC_CHK_AUTONEXT:
+            g_app.auto_next =
+                (SendMessageW(g_app.chk_autonext, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            prefs_set_auto_next(g_app.auto_next);
+            SetFocus(hwnd);
+            return 0;
+
         case IDC_BTN_PLAYPAUSE:
         case IDM_PLAY_TOGGLE:
             if (g_app.player.is_open) {
+                g_app.user_stopped = false;
+                g_app.track_ended_handled = false;
                 player_toggle_play_pause(&g_app.player);
                 if (g_app.player.state == PLAYER_PAUSED) {
                     save_current_position(false);
@@ -1056,6 +1600,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         case IDC_BTN_STOP:
         case IDM_PLAY_STOP:
+            g_app.user_stopped = true;
             if (g_app.player.is_open) {
                 player_stop(&g_app.player);
                 if (g_app.remember_pos) {
@@ -1135,6 +1680,15 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         KillTimer(hwnd, IDT_PLAYBACK_TIMER);
         save_current_position(true);
         player_close(&g_app.player);
+        if (g_app.icon_open)     { DestroyIcon(g_app.icon_open);     g_app.icon_open = NULL; }
+        if (g_app.icon_prev)     { DestroyIcon(g_app.icon_prev);     g_app.icon_prev = NULL; }
+        if (g_app.icon_play)     { DestroyIcon(g_app.icon_play);     g_app.icon_play = NULL; }
+        if (g_app.icon_pause)    { DestroyIcon(g_app.icon_pause);    g_app.icon_pause = NULL; }
+        if (g_app.icon_stop)     { DestroyIcon(g_app.icon_stop);     g_app.icon_stop = NULL; }
+        if (g_app.icon_next)     { DestroyIcon(g_app.icon_next);     g_app.icon_next = NULL; }
+        if (g_app.icon_playlist) { DestroyIcon(g_app.icon_playlist); g_app.icon_playlist = NULL; }
+        if (g_app.icon_close)    { DestroyIcon(g_app.icon_close);    g_app.icon_close = NULL; }
+        playlist_free(&g_app.playlist);
         for (int i = 0; i < SUB_SLOT_COUNT; i++) {
             srt_free_subtitle(&g_app.slots[i].sub);
         }
@@ -1156,9 +1710,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     (void)nCmdShow;
 
     ZeroMemory(&g_app, sizeof(g_app));
+    playlist_init(&g_app.playlist);
     player_init(&g_app.player);
     prefs_init();
     g_app.remember_pos = prefs_get_remember_position();
+    g_app.auto_next = prefs_get_auto_next();
+    g_app.show_playlist = prefs_get_show_playlist();
 
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -1221,6 +1778,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     ACCEL accels[] = {
         {FCONTROL | FVIRTKEY, 'O', IDM_FILE_OPEN},
+        {FCONTROL | FVIRTKEY, 'P', IDM_VIEW_PLAYLIST},
+        {FCONTROL | FVIRTKEY, VK_LEFT, IDM_PLAY_PREVFILE},
+        {FCONTROL | FVIRTKEY, VK_RIGHT, IDM_PLAY_NEXTFILE},
     };
     HACCEL hAccel = CreateAcceleratorTableW(accels, sizeof(accels) / sizeof(accels[0]));
 
@@ -1231,6 +1791,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         }
         /* Handle player shortcuts globally unless a subtitle dropdown is open */
         if (msg.message == WM_KEYDOWN && !any_combo_dropped()) {
+            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                if (msg.wParam == 'P' || msg.wParam == 'p') {
+                    toggle_playlist_visibility();
+                    continue;
+                } else if (msg.wParam == VK_LEFT) {
+                    play_prev_audio_file();
+                    continue;
+                } else if (msg.wParam == VK_RIGHT) {
+                    play_next_audio_file();
+                    continue;
+                }
+            }
+            if (msg.wParam == VK_RETURN && GetFocus() == g_app.list_playlist) {
+                int sel = (int)SendMessageW(g_app.list_playlist, LB_GETCURSEL, 0, 0);
+                if (sel >= 0 && (size_t)sel < g_app.playlist.count) {
+                    open_audio_file(g_app.playlist.paths[sel]);
+                }
+                continue;
+            }
             if (msg.wParam == VK_SPACE) {
                 SendMessageW(hwnd, WM_COMMAND, IDM_PLAY_TOGGLE, 0);
                 continue;

@@ -15,6 +15,7 @@ typedef struct Mp3Player {
     PlayerState state;
     long long duration_ms;
     int volume_percent; /* 0..100 */
+    HWND hwnd_callback;
     wchar_t current_path[MAX_PATH];
     wchar_t last_error[512];
 } Mp3Player;
@@ -22,6 +23,7 @@ typedef struct Mp3Player {
 typedef Mp3Player AudioPlayer;
 
 void player_init(Mp3Player *p);
+void player_set_callback(Mp3Player *p, HWND hwnd);
 bool player_open(Mp3Player *p, const wchar_t *path);
 void player_close(Mp3Player *p);
 
@@ -35,6 +37,10 @@ bool player_set_volume(Mp3Player *p, int vol_percent);
 
 long long player_get_position(Mp3Player *p);
 PlayerState player_refresh_state(Mp3Player *p);
+
+bool player_is_supported_audio_extension(const wchar_t *filename);
+bool player_find_next_audio_file(const wchar_t *current_path, wchar_t *next_path_out, size_t next_path_chars);
+bool player_find_prev_audio_file(const wchar_t *current_path, wchar_t *prev_path_out, size_t prev_path_chars);
 
 #endif /* PLAYER_H */
 
